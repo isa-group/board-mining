@@ -1,4 +1,5 @@
 from tkinter.tix import InputOnly
+from matplotlib import use
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -8,7 +9,7 @@ import seaborn as sns
 import pm4py
 import networkx as nx
 
-def log_info(df):
+def log_info(df, notypes=True):
     log_info = {}
     log_info["events"] = len(df)
     log_info["attribs"] = len(df.columns)
@@ -20,6 +21,7 @@ def log_info(df):
     log_info["list_closed"] = df["data.list.closed"].value_counts().to_dict()[True] if "data.list.closed" in df.columns else 0
     log_info["start"] = min(df["date"])
     log_info["ends"] = max(df["date"])
+    log_info["board_duration"] = log_info["ends"] - log_info["start"]
     log_info["first_event_type"] = df.loc[df["date"].argmin(),"type"]
     log_info["members"] = df["idMemberCreator"].nunique()
     log_info["events_per_member"] = df["idMemberCreator"].value_counts().describe().to_dict()
@@ -29,7 +31,8 @@ def log_info(df):
     log_info["card_closed"] = df["data.card.closed"].value_counts().to_dict()[True] if "data.card.closed" in df.columns else 0
     log_info["card_deleted"] = (df["type"]=="deleteCard").sum()
     log_info["card_due"] = df["data.card.due"].count() if "data.card.due" in df.columns else 0
-    log_info["types"] = df["type"].value_counts().to_dict()
+    if not notypes:
+        log_info["types"] = df["type"].value_counts().to_dict()
 
     if "data.card.id" in df.columns:
         log_info["cards_moving_perc"] = df[~df["data.listBefore.id"].isna()]['data.card.id'].nunique()/log_info["cards"] if "data.listBefore.id" in df.columns else 0
@@ -49,17 +52,22 @@ def enrich_log(df):
     if not "data.card.closed" in df.columns:
         df["data.card.closed"] = False
 
-    df["data.list.comb"] = (df["data.list.name"]+"["+df["data.list.id"].str.slice(18,24)+"]")
-    if df["data.list.id"].str.slice(18,24).nunique() != df["data.list.id"].nunique():
-        print("WARNING: list abbreviation is missing information")
+    if not "data.list.name" in df.columns:
+        df["data.list.comb"] = None
+    else: 
+        df["data.list.comb"] = (df["data.list.name"]+"["+df["data.list.id"].str.slice(18,24)+"]")
+        if df["data.list.id"].str.slice(18,24).nunique() != df["data.list.id"].nunique():
+            print("WARNING: list abbreviation is missing information")
 
     if not "data.listBefore.id" in df.columns:
         df["data.listBefore.id"] = None
+        df["data.listBefore.comb"] = None
     else:
         df["data.listBefore.comb"] = (df["data.listBefore.name"]+"["+df["data.listBefore.id"].str.slice(18,24)+"]")
 
     if not "data.listAfter.id" in df.columns:
         df["data.listAfter.id"] = None
+        df["data.listAfter.comb"] = None
     else:
         df["data.listAfter.comb"] = (df["data.listAfter.name"]+"["+df["data.listAfter.id"].str.slice(18,24)+"]")
 
@@ -176,12 +184,12 @@ def detect_redesign(df, threshold, l_type = None, threshold_l_events = 0):
 
     if isinstance(threshold, pd.Timedelta):
         r_events = df_rev.groupby(l_events.cumsum())['date'].transform(lambda x: x - np.min(x)) < threshold
-        redesign_events = r_events | (~df_rev["l"].isna())
+        redesign_events = r_events | l_events
     #b = df.groupby((~df["l"].isna()).cumsum())['date'].transform(lambda x: np.max(x) - x) < threshold
     #redesign_events = (a | b)
     else:
         r_events = (df_rev.groupby(l_events.cumsum())['id'].transform('count') < threshold)
-        redesign_events = r_events | (~df_rev["l"].isna())
+        redesign_events = r_events | l_events
         # asdf = pd.concat([(df[df["l"].isna()].groupby((~df["l"].isna()).cumsum()[df["l"].isna()])['id'].transform('count') < 15), ~df["l"].isna()], axis=1)
         # c = pd.concat([(asdf["l"] | asdf["id"]), (asdf["l"] | asdf["id"]).shift(1,fill_value=False)], axis=1)
         # pd.concat([(c[0] & ~c[1]).cumsum(), c[0], df['date']], axis=1)
@@ -237,7 +245,7 @@ def plot_card_actions(df, filter=None, use='comb', **kwargs):
     else:
         y = "data.list.name"
 
-    chart = sns.displot(first[first["c"].isin(["card_act", "card_create"])], x="date", row="c", binwidth=1, y=y, kind='hist', **kwargs)    
+    chart = sns.displot(first[first["c"].isin(["card_act", "card_create"])][["date", "c", y]].fillna('##UNKNOWN'), x="date", row="c", binwidth=1, y=y, kind='hist', **kwargs)    
     chart.set_xticklabels(rotation=45)
 
 
@@ -258,19 +266,236 @@ def transition_matrix(df, use='names'):
     if use == 'names':
         return df.groupby(['data.listBefore.name', 'data.listAfter.name'])['id'].count().unstack()
     elif use == 'id':
-        conversion_map = df.groupby("data.list.id")["data.list.name"].first().to_dict()
+        conversion_map = _create_conversion_map(df)
         matrix = df.groupby(['data.listBefore.id', 'data.listAfter.id'])['id'].count().unstack()
         return matrix.rename(index=conversion_map, columns=conversion_map)
     else: 
         return df.groupby(['data.listBefore.comb', 'data.listAfter.comb'])['id'].count().unstack()
 
-def connected_lists(df, use='id'):
+def connected_lists(df : pd.DataFrame, use='id', threshold=0):
+
     G = nx.Graph()
     if use == 'id':
         G.add_nodes_from(df['data.list.id'].dropna())
-        G.add_edges_from(df[['data.listAfter.id','data.listBefore.id']].dropna().to_numpy().tolist())
+        pair = ['data.listAfter.id','data.listBefore.id']
+        type = 'data.listAfter.id'
     else:
         G.add_nodes_from(df['data.list.comb'].dropna())
-        G.add_edges_from(df[['data.listAfter.comb','data.listBefore.comb']].dropna().to_numpy().tolist())
+        pair = ['data.listAfter.comb','data.listBefore.comb']
+        type = 'data.listAfter.comb'
 
-    return list(nx.connected_components(G))
+    if threshold > 0:
+        count = df[pair+['data.card.id']].dropna().groupby(pair).count()
+        G.add_edges_from(count[count['data.card.id'] > threshold].index.to_numpy().tolist())
+
+    else: 
+        G.add_edges_from(df[pair].dropna().to_numpy().tolist())
+
+    cl = list(nx.connected_components(G))
+    return pd.DataFrame([(i,len(i),df[df[type].isin(i)]["id"].count()) for i in cl], columns=["component", "size", "count"])
+
+
+def _type_for_use(use):
+    if use == 'id':
+        return 'data.list.id'
+    elif use == 'comb':
+        return 'data.list.comb'
+    else:
+        return 'data.list.name'
+
+
+def _create_conversion_map(df):
+    return {
+        **df.groupby("data.list.id")["data.list.name"].first().to_dict(),
+        **df.groupby("data.listAfter.id")["data.listAfter.name"].first().to_dict(),
+        **df.groupby("data.listBefore.id")["data.listBefore.name"].first().to_dict()
+    }
+
+
+
+def card_action_list(df : pd.DataFrame, type='card_create', use='id', threshold=0):
+    at = _type_for_use(use)
+
+    result = df[df["c"]==type].groupby(at)['id'].count()
+
+    if use=='id':
+        conversion_map = _create_conversion_map(df)
+        result = result.rename(index=conversion_map)
+
+    return result[result > threshold].transform(lambda x: x/x.sum())
+
+
+def flow_semantic_precedence(df: pd.DateOffset, use='id', threshold=0):
+
+    matrix = transition_matrix(df, use)
+
+    if threshold > 0:
+        num_moves = (df["c"]=="card_move").sum()
+        matrix = matrix/num_moves
+        matrix = matrix[matrix > threshold]
+    
+    return list(matrix.stack().index)
+
+
+def board_discovery(df : pd.DataFrame, use='id', cf_threshold=0, cc_threshold=0, cx_threshold=0, cu_threshold=0, sp_threshold=0):
+    cl = connected_lists(df, use, cf_threshold)
+    cf = list(cl["component"])
+    L = [l for c in cf for l in c]
+    cc = card_action_list(df, type='card_create', use=use, threshold=cc_threshold)
+    cx = card_action_list(df, type='card_close', use=use, threshold=cx_threshold)
+    cu = card_action_list(df, type='card_act', use=use, threshold=cu_threshold)
+    sp = flow_semantic_precedence(df, use, sp_threshold)
+
+    if use=='id':
+        conversion_map = _create_conversion_map(df)
+        L = [conversion_map[l] for l in L]
+        cf = [{conversion_map[l] for l in c} for c in cf]
+
+    return {
+        "lists": L, 
+        "card_flow": cf, 
+        "semantic_precedence": sp,
+        "card_create_list": cc, 
+        "card_close_list": cx, 
+        "card_use_list": cu
+    }
+
+
+
+def _print_list(l):
+    if len(l) > 0:
+        to_print = "- " + l.index + " ("+l.astype(str)+")"
+        print("\n".join(to_print))
+    else:
+        print("- None")
+
+
+def print_board_discovery(board_design):
+    print("Lists: ", board_design["lists"])
+    print("# Card flow:")
+    for i,l in enumerate(board_design["card_flow"]):
+        print("- ", i, ", ".join(l))
+    print("")
+    print("# Creation lists:")
+    _print_list(board_design["card_create_list"])
+    print("")
+    print("# Close lists:")
+    _print_list(board_design["card_close_list"])
+    print("")
+    print("# Use lists:")
+    _print_list(board_design["card_use_list"])
+    print("")
+
+def redesign_metrics(df : pd.DataFrame, redesigns : pd.DataFrame):
+    info = {}
+    info['redesigns'] = redesigns['count'].describe().to_dict()
+    info['redesign_distance'] = (redesigns['min'] - redesigns['max'].shift(-1, fill_value=df["date"].min())).describe().to_dict()
+    info['redesign_distance_meandays'] = info['redesign_distance']["mean"] / pd.Timedelta('1D')
+
+    return info
+
+def list_evolution_metrics(df : pd.DataFrame, evolution : pd.DataFrame):
+    info = {}
+    board_duration = df["date"].max() - df["date"].min()
+    info['list_duration'] = (evolution['last_date'] - evolution['begin_date']).mean()
+    info['list_duration_perc'] = ((evolution['last_date'] - evolution['begin_date']) / board_duration).describe().to_dict()
+    info['list_renames_mean'] = evolution['data.list.name'].apply(lambda x: len(x)).mean()
+
+    return info
+
+def connected_metrics(df : pd.DataFrame, connected : pd.DataFrame):
+    info = {}
+
+    info['list_num_components'] = len(connected)
+    info['list_connected_size_mean'] = connected["size"].mean()
+    info['list_connected_size_mean_perc'] = info['list_connected_size_mean'] / connected["size"].sum()
+    info['list_num_components_move'] = (connected["count"] > 0).sum()
+    # connected = bomi.connected_lists(df, threshold=df[df["c"] == "card_move"]['data.card.id'].count()*0.01)
+    # info['list_connected_1p'] = len(connected)
+    # info['list_connected_size_median_1p'] = np.median([len(c) for c in connected])
+
+    return info
+
+def move_metrics(df : pd.DataFrame):
+    info = {}    
+
+    if "data.list.id" in df.columns:
+        num_lists = pd.concat([df["data.list.id"], df["data.listBefore.id"], df["data.listAfter.id"]]).nunique()
+        moves = df[df["c"]=="card_move"].groupby("data.listBefore.id")['id'].count().add(df[df["c"]=="card_move"].groupby("data.listAfter.id")['id'].count(), fill_value=0)
+        info['move_per_list_with_move'] = moves.mean()
+        info['list_with_move_perc'] =  len(moves)  / num_lists
+
+    if "data.card.id" in df.columns:
+        cards = df["data.card.id"].nunique()
+        info["cards_moving_perc"] = df[~df["data.listBefore.id"].isna()]['data.card.id'].nunique()/cards
+        info['moves_per_moving_card'] = df[df["c"] == "card_move"].groupby("data.card.id")['id'].count().mean()
+
+    return info
+
+def act_metrics(df : pd.DataFrame):
+    info = {}
+
+    if "data.list.id" in df.columns:
+        info['act_per_list'] = df[df["c"]=="card_act"].groupby("data.list.id")['id'].count().mean()
+
+    if "data.card.id" in df.columns:
+        cards = df["data.card.id"].nunique()
+        info['cards_act_perc'] = df[df["c"]=="card_act"]['data.card.id'].nunique()/cards
+        info['act_per_act_card'] = df[df["c"]=="card_act"].groupby("data.card.id")['id'].count().mean()
+
+    return info
+
+def close_metrics(df : pd.DataFrame):
+    info = {}
+    cards = df["data.card.id"].nunique()
+    info["cards_closed_perc"] = df[df["data.card.closed"]==True]['data.card.id'].nunique()/cards if "data.card.closed" in df.columns else 0
+
+    return info
+
+
+def static_metrics(df: pd.DataFrame, redesigns = None, time_threshold = None, event_threshold = None, **kwargs):
+    if redesigns is None:
+        connected = connected_lists(df, **kwargs)
+        return _compute_static_metrics(df, connected)
+    else:
+        info = []
+        index = []
+        first = redesigns['max'].values
+        last = redesigns['min'].shift(1, fill_value=df["date"].max()).values
+
+        for f, l in zip(first, last):
+            if time_threshold is not None and l - f < time_threshold:
+                continue
+
+            filtered_df = df[(df["date"].values >= f) & (df["date"].values <= l)]
+
+            if event_threshold is not None and len(filtered_df) < event_threshold:
+                continue
+
+            filtered_conn = connected_lists(filtered_df, **kwargs)
+            info.append({
+                "events": len(filtered_df),
+                "cards": filtered_df["data.card.id"].nunique(),
+                "lists": filtered_df["data.list.id"].nunique(),
+                **_compute_static_metrics(filtered_df, filtered_conn)
+            })
+            index.append((f,l))
+
+        if len(index) > 0:
+            return pd.DataFrame.from_records(pd.json_normalize(info), index = pd.IntervalIndex.from_tuples(index))
+        else:
+            return pd.DataFrame()
+
+
+def _compute_static_metrics(df, connected):
+    connected = connected_metrics(df, connected)
+    move = move_metrics(df)
+    act = act_metrics(df)
+    info = {
+        **connected,
+        **move,
+        **act,
+        **close_metrics(df)
+    }    
+
+    return info
