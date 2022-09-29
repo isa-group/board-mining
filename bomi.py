@@ -8,6 +8,42 @@ import matplotlib.ticker as ticker
 import seaborn as sns
 import pm4py
 import networkx as nx
+import random
+import string
+import requests
+import json
+
+def load_board(board_id, batch=1000, enrich=True):
+    actions = []
+    finished = False
+    beforeeval = None
+    df = None
+
+    while not finished:
+        before = f"&before={beforeeval}" if beforeeval else ""
+        url = f"https://api.trello.com/1/boards/{board_id}/actions?limit={batch}{before}"
+        agent = ''.join(random.choice(string.ascii_lowercase) for i in range(16))
+        HEADERS = {'user-agent': agent}
+
+
+        response = requests.get(url, headers=HEADERS)
+        if response.status_code == 200:
+            data = response.json()
+            print(f"date {beforeeval}, size {len(data)}")
+            if len(data) < batch:
+                actions.extend(data)
+                finished = True
+                df = pd.json_normalize(actions)
+                df["date"] = pd.to_datetime(df["date"], infer_datetime_format=True)                  
+            else:
+                beforeeval = data[batch - 1]["date"]
+                actions.extend(data)    
+
+    if enrich:
+        enrich_log(df)
+
+    return df
+
 
 def log_info(df, notypes=True):
     log_info = {}
@@ -230,7 +266,7 @@ def plot_list_diagram(list_evolution, begin_end_redesign, ax):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d-%Y'))
     ax.tick_params(which='major', axis='x', rotation=90, length=11, color='black')    
 
-def plot_card_actions(df, filter=None, use='comb', **kwargs):
+def plot_card_actions_ind(df, filter=None, use='comb', **kwargs):
     if filter is None:
         first = df
     elif isinstance(filter, tuple):
@@ -247,6 +283,36 @@ def plot_card_actions(df, filter=None, use='comb', **kwargs):
 
     chart = sns.displot(first[first["c"].isin(["card_act", "card_create"])][["date", "c", y]].fillna('##UNKNOWN'), x="date", row="c", binwidth=1, y=y, kind='hist', **kwargs)    
     chart.set_xticklabels(rotation=45)
+
+def plot_card_actions(df, begin_end_redesign = None, use='comb', **kwargs):
+    if use == 'comb':
+        x = "data.list.comb"
+    elif use == 'id':
+        x = "data.list.id"
+    else:
+        x = "data.list.name"
+
+    if not "height" in kwargs:
+        kwargs["height"] = 20
+    if not "aspect" in kwargs:
+        kwargs["aspect"] = 20/9
+
+    ch = sns.catplot(x=x, y="date", hue="c", data=df[df["c"].isin(["card_act", "card_create", "card_move", "card_close"])][["c", "date", "data.list.comb"]].fillna('##UNKNOWN'), **kwargs)
+    ch.set_xticklabels(rotation=90)
+
+    for f in begin_end_redesign["min"].values:
+        ch.refline(y=f)    
+    
+    return ch
+
+def plot_card_actions_summary(df, begin_end_redesign = None, **kwargs):
+    ax = sns.displot(df, x="date", col="c", col_wrap=2, **kwargs)
+    ax.set_xticklabels(rotation=50)
+
+    for f in begin_end_redesign["min"].values:
+        ax.refline(x=f)
+
+    return ax
 
 
 def to_event_log(df):
