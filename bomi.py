@@ -116,9 +116,11 @@ def enrich_log(df):
     df.loc[(df["type"]=="updateList") & (~df["data.old.name"].isna()),'l'] = "list_rename"
     df.loc[df["type"].isin(["moveListFromBoard"]), 'l'] = "list_move"
     if "data.list.closed" in df.columns:
-        df.loc[df["data.list.closed"].fillna(False), 'l'] = "list_ends" 
+        df.loc[df["data.list.closed"].infer_objects(copy=False).fillna(False), 'l'] = "list_ends" 
     else:
         df["data.list.closed"] = False
+    
+    df.loc[df["l"]=='nan', 'l'] = np.nan
 
 
 
@@ -137,7 +139,7 @@ def card_movement_filter(df):
     return ~df["data.listBefore.id"].isna()
 
 def card_closed_filter(df):
-    return df["data.card.closed"].fillna(False)
+    return df["data.card.closed"].infer_objects(copy=False).fillna(False)
 
 def card_action_filter(df):
     return df["type"].isin(["updateCard", "addMemberToCard", "commentCard", "addChecklistToCard", "updateCheckItemStateOnCard", "removeMemberFromCard", "updateChecklist", "removeChecklistFromCard", "addAttachmentToCard", "deleteAttachmentFromCard"])
@@ -204,7 +206,7 @@ def list_evolution(df, filter_short_lists=None):
         return result
 
 def detect_redesign(df, threshold, l_type = None, threshold_l_events = 0):
-    df[df["l"].isna()].groupby((~df["l"].isna()).cumsum()[df["l"].isna()])['date'].transform(np.min)
+    df[df["l"].isna()].groupby((~df["l"].isna()).cumsum()[df["l"].isna()])['date'].transform("min")
 
     # The goal of this is to create a Series where the True value represent those events that are part of
     # a redesign. We consider that these events are those that are within a configurable threshold time 
