@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bomi"
+version = "0.1.0"
+description = "Board mining tools for board-based collaborative work management event logs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Board Miner contributors" }
+]
+keywords = [
+  "board mining",
+  "process mining",
+  "Trello",
+  "collaborative work management",
+  "event logs"
+]
+dependencies = [
+  "matplotlib",
+  "networkx",
+  "numpy",
+  "pandas",
+  "requests",
+  "seaborn"
+]
+
+[project.optional-dependencies]
+process = ["pm4py"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
