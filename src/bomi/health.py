@@ -17,11 +17,12 @@ Functions are organised in four layers:
    :func:`completion_rate`, :func:`abandonment_rate`,
    :func:`health_dimensions`, :func:`board_health`.
 
-All functions accept a ``method`` parameter (forwarded to
-:func:`card_closed_mask`) that controls what counts as a completed card.
-Time-based functions accept an optional ``reference_date``; when omitted it
-defaults to the last timestamp in the log, which is the right choice for
-retrospective analysis of historical boards.
+All functions that deal with open cards share a consistent parameter order:
+``method``, ``sink_lists``, ``reference_date``.  When ``reference_date`` is
+provided, it is used both as the measurement anchor *and* to determine which
+cards were open at that point in time — a card completed after
+``reference_date`` is treated as open.  When omitted, it defaults to the last
+timestamp in the log (correct for retrospective batch analysis).
 """
 
 from __future__ import annotations
@@ -76,9 +77,10 @@ def _reference(df: pd.DataFrame, reference_date) -> pd.Timestamp:
     return df[TIMESTAMP].max() if reference_date is None else pd.Timestamp(reference_date)
 
 
-def _active_cards(df: pd.DataFrame, method, sink_lists) -> pd.Index:
-    """Return card IDs not considered completed."""
-    completed = card_closed_mask(df, method=method, sink_lists=sink_lists)
+def _open_cards(df: pd.DataFrame, method, sink_lists, reference_date=None) -> pd.Index:
+    """Return IDs of cards that are open (not completed) at *reference_date*."""
+    completed = card_closed_mask(df, method=method, sink_lists=sink_lists,
+                                 reference_date=reference_date)
     return completed[~completed].index
 
 
@@ -109,6 +111,7 @@ def card_closed_mask(
     df: pd.DataFrame,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
     """Return a boolean Series indexed by card_id: True if card is completed.
 
@@ -125,17 +128,25 @@ def card_closed_mask(
 
         Multiple methods are combined with a logical OR.
     sink_lists:
-        List names (or IDs) to treat as sink lists when ``method`` includes
+        List names to treat as sink lists when ``method`` includes
         ``"sink_list"``.
+    reference_date:
+        Completion events after this date are ignored — a card completed after
+        ``reference_date`` is considered open at that point in time.  Defaults
+        to ``None`` (use all events).
     """
     methods = [method] if isinstance(method, str) else list(method)
 
-    all_cards = df[CARD_ID].dropna().unique()
+    # Only consider events up to reference_date for completion determination.
+    ref = pd.Timestamp(reference_date) if reference_date is not None else None
+    df_ref = df[df[TIMESTAMP] <= ref] if ref is not None else df
+
+    all_cards = df_ref[CARD_ID].dropna().unique()
     result = pd.Series(False, index=pd.Index(all_cards, name=CARD_ID), name="completed")
 
-    if "archived" in methods and CARD_CLOSED in df.columns:
+    if "archived" in methods and CARD_CLOSED in df_ref.columns:
         archived = (
-            df[df[CARD_CLOSED].eq(True)][CARD_ID]
+            df_ref[df_ref[CARD_CLOSED].eq(True)][CARD_ID]
             .dropna()
             .unique()
         )
@@ -143,18 +154,18 @@ def card_closed_mask(
 
     if "sink_list" in methods and sink_lists:
         last_move_name = pd.Series(dtype=str)
-        if TARGET_LIST_NAME in df.columns:
+        if TARGET_LIST_NAME in df_ref.columns:
             last_move_name = (
-                df[df[CARD_EVENT_TYPE] == "card_move"]
+                df_ref[df_ref[CARD_EVENT_TYPE] == "card_move"]
                 .dropna(subset=[CARD_ID, TARGET_LIST_NAME])
                 .sort_values(TIMESTAMP)
                 .groupby(CARD_ID)[TARGET_LIST_NAME]
                 .last()
             )
         create_name = pd.Series(dtype=str)
-        if LIST_NAME in df.columns:
+        if LIST_NAME in df_ref.columns:
             create_name = (
-                df[df[CARD_EVENT_TYPE] == "card_create"]
+                df_ref[df_ref[CARD_EVENT_TYPE] == "card_create"]
                 .dropna(subset=[CARD_ID, LIST_NAME])
                 .sort_values(TIMESTAMP)
                 .groupby(CARD_ID)[LIST_NAME]
@@ -164,8 +175,8 @@ def card_closed_mask(
         sink_cards = last_list_name[last_list_name.isin(sink_lists)].index
         result.loc[result.index.isin(sink_cards)] = True
 
-    if "deleted" in methods and CARD_EVENT_TYPE in df.columns:
-        deleted = df[df[CARD_EVENT_TYPE] == "card_delete"][CARD_ID].dropna().unique()
+    if "deleted" in methods and CARD_EVENT_TYPE in df_ref.columns:
+        deleted = df_ref[df_ref[CARD_EVENT_TYPE] == "card_delete"][CARD_ID].dropna().unique()
         result.loc[result.index.isin(deleted)] = True
 
     return result
@@ -177,14 +188,15 @@ def card_closed_mask(
 
 def card_age(
     df: pd.DataFrame,
-    reference_date=None,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return the age of each active card as a Timedelta.
+    """Return the age of each open card as a Timedelta.
 
     Age is measured from the card's last ``card_move`` or ``card_create``
-    event to *reference_date*.  Completed cards are excluded.
+    event up to *reference_date*.  Cards completed at or before *reference_date*
+    are excluded; cards completed after it are treated as open.
 
     Returns
     -------
@@ -192,11 +204,12 @@ def card_age(
         :class:`pandas.Timedelta` Series indexed by ``card_id``.
     """
     ref = _reference(df, reference_date)
-    active = _active_cards(df, method, sink_lists)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
 
     relevant = df[
         df[CARD_EVENT_TYPE].isin(["card_move", "card_create"])
-        & df[CARD_ID].isin(active)
+        & df[CARD_ID].isin(open_c)
+        & (df[TIMESTAMP] <= ref)
     ]
     last_event = relevant.groupby(CARD_ID)[TIMESTAMP].max()
     return (ref - last_event).rename("card_age")
@@ -204,15 +217,16 @@ def card_age(
 
 def inactive_cards(
     df: pd.DataFrame,
-    window: pd.Timedelta,
-    reference_date=None,
+    window: pd.Timedelta = pd.Timedelta("30D"),
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return a boolean mask of active cards with no recent movement or action.
+    """Return a boolean mask of open cards with no recent movement or action.
 
     A card is inactive if it had no ``card_move`` or ``card_act`` event within
-    *window* before *reference_date*.  Completed cards are excluded.
+    *window* before *reference_date*.  Cards completed at or before
+    *reference_date* are excluded.
 
     Returns
     -------
@@ -220,20 +234,21 @@ def inactive_cards(
         bool Series indexed by ``card_id``; ``True`` means inactive.
     """
     ref = _reference(df, reference_date)
-    active = _active_cards(df, method, sink_lists)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
     cutoff = ref - window
 
     recently_active = (
         df[
             df[CARD_EVENT_TYPE].isin(["card_move", "card_act"])
-            & df[CARD_ID].isin(active)
+            & df[CARD_ID].isin(open_c)
             & (df[TIMESTAMP] >= cutoff)
+            & (df[TIMESTAMP] <= ref)
         ][CARD_ID]
         .dropna()
         .unique()
     )
 
-    result = pd.Series(True, index=active, name="inactive")
+    result = pd.Series(True, index=open_c, name="inactive")
     result.loc[result.index.isin(recently_active)] = False
     return result
 
@@ -242,48 +257,56 @@ def orphan_cards(
     df: pd.DataFrame,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return a boolean mask of active cards that were never moved or acted on.
+    """Return a boolean mask of open cards that were never moved or acted on.
 
     An orphan card has only a ``card_create`` event and no subsequent
-    ``card_move`` or ``card_act`` events.  Completed cards are excluded.
+    ``card_move`` or ``card_act`` events up to *reference_date*.  Cards
+    completed at or before *reference_date* are excluded.
 
     Returns
     -------
     pd.Series
         bool Series indexed by ``card_id``; ``True`` means orphan.
     """
-    active = _active_cards(df, method, sink_lists)
+    ref = _reference(df, reference_date)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
 
     has_activity = (
         df[
             df[CARD_EVENT_TYPE].isin(["card_move", "card_act"])
-            & df[CARD_ID].isin(active)
+            & df[CARD_ID].isin(open_c)
+            & (df[TIMESTAMP] <= ref)
         ][CARD_ID]
         .dropna()
         .unique()
     )
 
     created = (
-        df[df[CARD_EVENT_TYPE] == "card_create"][CARD_ID].dropna().unique()
+        df[
+            (df[CARD_EVENT_TYPE] == "card_create")
+            & (df[TIMESTAMP] <= ref)
+        ][CARD_ID].dropna().unique()
     )
-    created_active = pd.Index(created, name=CARD_ID).intersection(active)
+    created_open = pd.Index(created, name=CARD_ID).intersection(open_c)
 
-    result = pd.Series(True, index=created_active, name="orphan")
+    result = pd.Series(True, index=created_open, name="orphan")
     result.loc[result.index.isin(has_activity)] = False
     return result
 
 
 def overdue_cards(
     df: pd.DataFrame,
-    reference_date=None,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return a boolean mask of active cards past their due date.
+    """Return a boolean mask of open cards past their due date.
 
     Requires the ``card_due`` column; returns an empty Series with a warning
-    when the column is absent.
+    when the column is absent.  Cards completed at or before *reference_date*
+    are excluded.
 
     Returns
     -------
@@ -298,10 +321,14 @@ def overdue_cards(
         return pd.Series(dtype=bool, name="overdue")
 
     ref = _reference(df, reference_date)
-    active = _active_cards(df, method, sink_lists)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
 
     due_dates = (
-        df[df[CARD_ID].isin(active) & df[CARD_DUE].notna()]
+        df[
+            df[CARD_ID].isin(open_c)
+            & df[CARD_DUE].notna()
+            & (df[TIMESTAMP] <= ref)
+        ]
         .sort_values(TIMESTAMP)
         .groupby(CARD_ID)[CARD_DUE]
         .last()
@@ -313,12 +340,17 @@ def overdue_cards(
     return (due_dates < ref).rename("overdue")
 
 
-def bouncing_cards(df: pd.DataFrame) -> pd.Series:
-    """Return the number of list re-entries per card.
+def bouncing_cards(
+    df: pd.DataFrame,
+    method: str | Sequence[str] = "archived",
+    sink_lists: list[str] | None = None,
+    reference_date=None,
+) -> pd.Series:
+    """Return the number of list re-entries per open card.
 
     A re-entry (bounce) occurs when a card moves into a list it previously
-    left.  The count equals the number of such backward entries across the
-    card's entire move history.
+    left.  Only open cards at *reference_date* are included; only moves up to
+    *reference_date* are counted.
 
     Returns
     -------
@@ -329,8 +361,15 @@ def bouncing_cards(df: pd.DataFrame) -> pd.Series:
     if not all(c in df.columns for c in required):
         return pd.Series(dtype=int, name="bounces")
 
+    ref = _reference(df, reference_date)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
+
     moves = (
-        df[df[CARD_EVENT_TYPE] == "card_move"]
+        df[
+            (df[CARD_EVENT_TYPE] == "card_move")
+            & df[CARD_ID].isin(open_c)
+            & (df[TIMESTAMP] <= ref)
+        ]
         .dropna(subset=[CARD_ID, SOURCE_LIST_ID, TARGET_LIST_ID])
         .sort_values([CARD_ID, TIMESTAMP])
     )
@@ -353,15 +392,17 @@ def bouncing_cards(df: pd.DataFrame) -> pd.Series:
 
 def silent_moves(
     df: pd.DataFrame,
+    method: str | Sequence[str] = "archived",
+    sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return the count of silent list-stays per card.
+    """Return the count of silent list-stays per open card.
 
     A *stay* is the period a card occupies a list, from its arrival (via
     creation or a move) to its departure (via the next move).  A stay is
-    *silent* when no ``card_act`` event occurred during it.
-
-    All cards are included (active and completed), since silent stays are a
-    property of the card's history regardless of its current state.
+    *silent* when no ``card_act`` event occurred during it.  Only open cards
+    at *reference_date* are included; only events up to *reference_date* are
+    counted.
 
     Returns
     -------
@@ -372,8 +413,15 @@ def silent_moves(
     if CARD_EVENT_TYPE not in df.columns or CARD_ID not in df.columns:
         return pd.Series(dtype=int, name="silent_moves")
 
+    ref = _reference(df, reference_date)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
+
     card_events = (
-        df[df[CARD_EVENT_TYPE].notna() & df[CARD_ID].notna()]
+        df[
+            df[CARD_EVENT_TYPE].notna()
+            & df[CARD_ID].isin(open_c)
+            & (df[TIMESTAMP] <= ref)
+        ]
         [[CARD_ID, TIMESTAMP, CARD_EVENT_TYPE]]
         .sort_values([CARD_ID, TIMESTAMP])
     )
@@ -410,18 +458,18 @@ def silent_moves(
 
 def unassigned_cards(
     df: pd.DataFrame,
-    reference_date=None,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series | None:
-    """Return a boolean mask of active cards with no current member assignment.
+    """Return a boolean mask of open cards with no current member assignment.
 
     Tracks Trello ``addMemberToCard`` / ``removeMemberFromCard`` raw events.
     A card is considered assigned when its net count of add-minus-remove events
-    is positive at *reference_date*.
+    is positive at *reference_date*.  Cards completed at or before
+    *reference_date* are excluded.
 
-    Returns ``None`` when assignment events are absent from the log, so callers
-    can skip this indicator gracefully.
+    Returns ``None`` when assignment events are absent from the log.
 
     Returns
     -------
@@ -434,17 +482,13 @@ def unassigned_cards(
     ref = _reference(df, reference_date)
     mask_time = df[TIMESTAMP] <= ref
 
-    add_events = df[
-        (df[RAW_EVENT_TYPE] == "addMemberToCard") & mask_time
-    ]
-    remove_events = df[
-        (df[RAW_EVENT_TYPE] == "removeMemberFromCard") & mask_time
-    ]
+    add_events = df[(df[RAW_EVENT_TYPE] == "addMemberToCard") & mask_time]
+    remove_events = df[(df[RAW_EVENT_TYPE] == "removeMemberFromCard") & mask_time]
 
     if add_events.empty and remove_events.empty:
         return None
 
-    active = _active_cards(df, method, sink_lists)
+    open_c = _open_cards(df, method, sink_lists, reference_date=ref)
 
     add_counts = add_events.dropna(subset=[CARD_ID]).groupby(CARD_ID)[EVENT_ID].count()
     if remove_events.empty:
@@ -457,7 +501,7 @@ def unassigned_cards(
     net = add_counts.subtract(remove_counts, fill_value=0)
     assigned_cards = net[net > 0].index
 
-    result = pd.Series(True, index=active, name="unassigned")
+    result = pd.Series(True, index=open_c, name="unassigned")
     result.loc[result.index.isin(assigned_cards)] = False
     return result
 
@@ -469,13 +513,13 @@ def unassigned_cards(
 def stagnant_lists(
     df: pd.DataFrame,
     window: pd.Timedelta,
-    reference_date=None,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> pd.Series:
-    """Return the count of inactive active cards in each list.
+    """Return the count of inactive open cards in each list.
 
-    A list is stagnant when it accumulates cards that have had no
+    A list is stagnant when it accumulates open cards that have had no
     ``card_move`` or ``card_act`` event within *window*.
 
     Returns
@@ -485,7 +529,8 @@ def stagnant_lists(
         are omitted.
     """
     ref = _reference(df, reference_date)
-    inactive = inactive_cards(df, window, ref, method=method, sink_lists=sink_lists)
+    inactive = inactive_cards(df, window, method=method, sink_lists=sink_lists,
+                              reference_date=ref)
     inactive_ids = inactive[inactive].index
 
     if inactive_ids.empty:
@@ -515,7 +560,7 @@ def dead_lists(
     """
     ref = _reference(df, reference_date)
     cutoff = ref - window
-    recent = df[df[TIMESTAMP] >= cutoff]
+    recent = df[(df[TIMESTAMP] >= cutoff) & (df[TIMESTAMP] <= ref)]
 
     created_in = (
         recent[recent[CARD_EVENT_TYPE] == "card_create"]
@@ -591,8 +636,9 @@ def completion_rate(
     df: pd.DataFrame,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> float:
-    """Return the fraction of all cards that are completed.
+    """Return the fraction of all cards that are completed at *reference_date*.
 
     Returns
     -------
@@ -601,22 +647,22 @@ def completion_rate(
     """
     if CARD_ID not in df.columns:
         return 0.0
-    total = df[CARD_ID].dropna().nunique()
-    if total == 0:
-        return 0.0
-    completed = int(card_closed_mask(df, method=method, sink_lists=sink_lists).sum())
-    return completed / total
+    ref = _reference(df, reference_date)
+    mask = card_closed_mask(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    total = len(mask)
+    return int(mask.sum()) / total if total else 0.0
 
 
 def abandonment_rate(
     df: pd.DataFrame,
     method: str | Sequence[str] = "archived",
     sink_lists: list[str] | None = None,
+    reference_date=None,
 ) -> float:
     """Return the fraction of all cards that are orphan (never activated).
 
-    Abandoned cards are active orphans: they were created but never moved or
-    acted upon, and are not considered completed.
+    Abandoned cards are open orphans: they were created but never moved or
+    acted upon, and are not considered completed at *reference_date*.
 
     Returns
     -------
@@ -625,10 +671,12 @@ def abandonment_rate(
     """
     if CARD_ID not in df.columns:
         return 0.0
-    total = df[CARD_ID].dropna().nunique()
+    ref = _reference(df, reference_date)
+    mask = card_closed_mask(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    total = len(mask)
     if total == 0:
         return 0.0
-    orphans = orphan_cards(df, method=method, sink_lists=sink_lists)
+    orphans = orphan_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
     return int(orphans.sum()) / total
 
 
@@ -686,8 +734,8 @@ def health_dimensions(
         Optional output of :func:`bomi.detect_redesign`; enables the redesign
         frequency component of *structural_stability*.
     reference_date:
-        Reference point for time-based indicators.  Defaults to the last
-        timestamp in *df*.
+        Reference point for all indicators.  Defaults to the last timestamp
+        in *df*.
 
     Returns
     -------
@@ -697,32 +745,37 @@ def health_dimensions(
         ``board_vitality``.
     """
     ref = _reference(df, reference_date)
-    total_cards = df[CARD_ID].dropna().nunique() if CARD_ID in df.columns else 0
     total_lists = df[LIST_ID].dropna().nunique() if LIST_ID in df.columns else 0
+
+    # Open-card count for rates denominated over open cards
+    completed_mask = card_closed_mask(df, method=method, sink_lists=sink_lists,
+                                      reference_date=ref)
+    total_open = int((~completed_mask).sum())
 
     # ---- flow_discipline ----
     fc = flow_conformance(df, prescribed_flow=prescribed_flow, infer_threshold=infer_threshold)
-    bounces = bouncing_cards(df)
-    bouncing_rate = (bounces > 0).sum() / total_cards if total_cards else 0.0
-    sm = silent_moves(df)
-    silent_rate = (sm > 0).sum() / total_cards if total_cards else 0.0
+    bounces = bouncing_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    bouncing_rate = (bounces > 0).sum() / total_open if total_open else 0.0
+    sm = silent_moves(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    silent_rate = (sm > 0).sum() / total_open if total_open else 0.0
     flow_d = (fc + (1 - bouncing_rate) + (1 - silent_rate)) / 3
 
     # ---- collaboration_discipline ----
-    orphan_rate = abandonment_rate(df, method=method, sink_lists=sink_lists)
+    orphan_rate = abandonment_rate(df, method=method, sink_lists=sink_lists,
+                                   reference_date=ref)
     collab_components = [1 - orphan_rate]
-    ua = unassigned_cards(df, ref, method=method, sink_lists=sink_lists)
-    if ua is not None and total_cards:
-        collab_components.append(1 - ua.sum() / total_cards)
+    ua = unassigned_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    if ua is not None and total_open:
+        collab_components.append(1 - ua.sum() / total_open)
     collab_d = sum(collab_components) / len(collab_components)
 
     # ---- completion_discipline ----
-    comp = completion_rate(df, method=method, sink_lists=sink_lists)
-    aband = abandonment_rate(df, method=method, sink_lists=sink_lists)
+    comp = completion_rate(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    aband = abandonment_rate(df, method=method, sink_lists=sink_lists, reference_date=ref)
     completion_d = (comp + (1 - aband)) / 2
 
     # ---- structural_stability ----
-    dead = dead_lists(df, dead_list_window, ref)
+    dead = dead_lists(df, dead_list_window, reference_date=ref)
     dead_rate = dead.sum() / total_lists if total_lists else 0.0
     stability_components = [1 - dead_rate]
     if redesigns is not None and not redesigns.empty:
@@ -732,9 +785,11 @@ def health_dimensions(
     stability_d = sum(stability_components) / len(stability_components)
 
     # ---- board_vitality ----
-    inactive = inactive_cards(df, inactive_window, ref, method=method, sink_lists=sink_lists)
-    inactive_rate = inactive.sum() / total_cards if total_cards else 0.0
-    stagnant = stagnant_lists(df, inactive_window, ref, method=method, sink_lists=sink_lists)
+    inactive = inactive_cards(df, inactive_window, method=method, sink_lists=sink_lists,
+                              reference_date=ref)
+    inactive_rate = inactive.sum() / total_open if total_open else 0.0
+    stagnant = stagnant_lists(df, inactive_window, method=method, sink_lists=sink_lists,
+                              reference_date=ref)
     stagnant_list_rate = (stagnant > 0).sum() / total_lists if total_lists else 0.0
     vitality_d = ((1 - inactive_rate) + (1 - stagnant_list_rate)) / 2
 
@@ -786,7 +841,7 @@ def board_health(
     redesigns:
         Optional output of :func:`bomi.detect_redesign`.
     reference_date:
-        Reference point for time-based indicators.
+        Reference point for all indicators.
 
     Returns
     -------
@@ -798,21 +853,29 @@ def board_health(
         raw counts) plus five dimension scores prefixed with ``dim_``.
     """
     ref = _reference(df, reference_date)
-    total_cards = df[CARD_ID].dropna().nunique() if CARD_ID in df.columns else 0
     total_lists = df[LIST_ID].dropna().nunique() if LIST_ID in df.columns else 0
 
-    age = card_age(df, ref, method=method, sink_lists=sink_lists)
-    inactive = inactive_cards(df, inactive_window, ref, method=method, sink_lists=sink_lists)
-    orphans = orphan_cards(df, method=method, sink_lists=sink_lists)
-    overdue = overdue_cards(df, ref, method=method, sink_lists=sink_lists)
-    bounces = bouncing_cards(df)
-    sm = silent_moves(df)
-    ua = unassigned_cards(df, ref, method=method, sink_lists=sink_lists)
-    stagnant = stagnant_lists(df, inactive_window, ref, method=method, sink_lists=sink_lists)
-    dead = dead_lists(df, dead_list_window, ref)
-    fc = flow_conformance(df, prescribed_flow=prescribed_flow, infer_threshold=infer_threshold)
-    comp = completion_rate(df, method=method, sink_lists=sink_lists)
-    aband = abandonment_rate(df, method=method, sink_lists=sink_lists)
+    # Compute open/total counts once; all sub-functions reuse the same ref.
+    completed_mask = card_closed_mask(df, method=method, sink_lists=sink_lists,
+                                      reference_date=ref)
+    total_cards = len(completed_mask)
+    total_open = int((~completed_mask).sum())
+
+    age      = card_age(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    inactive = inactive_cards(df, inactive_window, method=method, sink_lists=sink_lists,
+                              reference_date=ref)
+    orphans  = orphan_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    overdue  = overdue_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    bounces  = bouncing_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    sm       = silent_moves(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    ua       = unassigned_cards(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    stagnant = stagnant_lists(df, inactive_window, method=method, sink_lists=sink_lists,
+                              reference_date=ref)
+    dead     = dead_lists(df, dead_list_window, reference_date=ref)
+    fc       = flow_conformance(df, prescribed_flow=prescribed_flow,
+                                infer_threshold=infer_threshold)
+    comp     = completion_rate(df, method=method, sink_lists=sink_lists, reference_date=ref)
+    aband    = abandonment_rate(df, method=method, sink_lists=sink_lists, reference_date=ref)
 
     dims = health_dimensions(
         df,
@@ -828,18 +891,22 @@ def board_health(
 
     report: dict = {
         "cards_total": total_cards,
+        "cards_open": total_open,
         "lists_total": total_lists,
-        # rates
-        "inactive_card_rate": float(inactive.sum() / total_cards) if total_cards else 0.0,
+        # rates over open cards
+        "inactive_card_rate": float(inactive.sum() / total_open) if total_open else 0.0,
+        "bouncing_rate": float((bounces > 0).sum() / total_open) if total_open else 0.0,
+        "silent_move_rate": float((sm > 0).sum() / total_open) if total_open else 0.0,
+        # rates over all cards (lifecycle metrics)
         "orphan_rate": float(len(orphans[orphans]) / total_cards) if total_cards else 0.0,
         "overdue_rate": float(overdue.sum() / len(overdue)) if len(overdue) else 0.0,
-        "bouncing_rate": float((bounces > 0).sum() / total_cards) if total_cards else 0.0,
-        "silent_move_rate": float((sm > 0).sum() / total_cards) if total_cards else 0.0,
-        "dead_list_rate": float(dead.sum() / total_lists) if total_lists else 0.0,
-        "stagnant_list_rate": float((stagnant > 0).sum() / total_lists) if total_lists else 0.0,
-        "flow_conformance": fc,
         "completion_rate": comp,
         "abandonment_rate": aband,
+        # list rates
+        "dead_list_rate": float(dead.sum() / total_lists) if total_lists else 0.0,
+        "stagnant_list_rate": float((stagnant > 0).sum() / total_lists) if total_lists else 0.0,
+        # flow
+        "flow_conformance": fc,
         # card age
         "card_age_mean_days": float(age.mean() / pd.Timedelta("1D")) if len(age) else None,
         "card_age_max_days": float(age.max() / pd.Timedelta("1D")) if len(age) else None,
@@ -855,7 +922,7 @@ def board_health(
     }
 
     if ua is not None:
-        report["unassigned_rate"] = float(ua.sum() / total_cards) if total_cards else 0.0
+        report["unassigned_rate"] = float(ua.sum() / total_open) if total_open else 0.0
         report["cards_unassigned"] = int(ua.sum())
 
     return report

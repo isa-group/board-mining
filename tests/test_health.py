@@ -209,6 +209,67 @@ def test_card_closed_mask_covers_all_cards():
     assert set(mask.index) == set(df["card_id"].dropna().unique())
 
 
+def test_card_closed_mask_ignores_completion_after_reference_date():
+    df = make_log()
+    # c_archived archived on 2024-01-05 — before that date it is still open
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    mask = bomi.card_closed_mask(df, method="archived", reference_date=ref_before)
+    assert "c_archived" in mask.index
+    assert not mask["c_archived"]
+
+
+def test_card_closed_mask_marks_card_completed_at_and_after_its_completion_date():
+    df = make_log()
+    ref_after = pd.Timestamp("2024-01-06T00:00Z")
+    mask = bomi.card_closed_mask(df, method="archived", reference_date=ref_after)
+    assert mask["c_archived"]
+
+
+# ---------------------------------------------------------------------------
+# reference_date correctness across per-card indicators
+# ---------------------------------------------------------------------------
+
+def test_card_age_includes_card_open_at_reference_date():
+    df = make_log()
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    age = bomi.card_age(df, reference_date=ref_before)
+    # c_archived was open on 2024-01-04, so it must appear in the result
+    assert "c_archived" in age.index
+
+
+def test_inactive_cards_includes_card_open_at_reference_date():
+    df = make_log()
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    inactive = bomi.inactive_cards(df, window=pd.Timedelta("30D"), reference_date=ref_before)
+    assert "c_archived" in inactive.index
+
+
+def test_orphan_cards_includes_card_open_at_reference_date():
+    df = make_log()
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    orphans = bomi.orphan_cards(df, reference_date=ref_before)
+    # c_archived was not yet archived and had no moves → orphan at that date
+    assert "c_archived" in orphans.index
+    assert orphans["c_archived"]
+
+
+def test_bouncing_cards_includes_card_open_at_reference_date():
+    df = make_log()
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    bounces = bomi.bouncing_cards(df, reference_date=ref_before)
+    # c_archived is open before its archive date; c_bouncing has bounces in range
+    assert "c_archived" not in bounces.index or bounces.get("c_archived", 0) == 0
+
+
+def test_completion_rate_uses_reference_date():
+    df = make_log()
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    rate_before = bomi.completion_rate(df, reference_date=ref_before)
+    rate_after = bomi.completion_rate(df, reference_date=REF)
+    # c_archived completes between these two dates, so rate increases
+    assert rate_after >= rate_before
+
+
 # ---------------------------------------------------------------------------
 # card_age
 # ---------------------------------------------------------------------------
@@ -353,9 +414,17 @@ def test_silent_moves_first_stay_silent_if_no_act_before_first_move():
     assert sm["c_active"] == 1
 
 
-def test_silent_moves_includes_completed_cards():
+def test_silent_moves_excludes_completed_cards():
     df = make_log()
     sm = bomi.silent_moves(df)
+    assert "c_archived" not in sm.index
+
+
+def test_silent_moves_treats_card_as_open_before_its_completion_date():
+    df = make_log()
+    # c_archived is archived on 2024-01-05; before that it is still open
+    ref_before = pd.Timestamp("2024-01-04T00:00Z")
+    sm = bomi.silent_moves(df, reference_date=ref_before)
     assert "c_archived" in sm.index
 
 

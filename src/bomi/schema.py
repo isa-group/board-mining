@@ -372,6 +372,8 @@ def compute_event_types(df: pd.DataFrame) -> pd.DataFrame:
 
     if EVENT_TYPE in result.columns:
         result.loc[result[EVENT_TYPE] == "createCard", CARD_EVENT_TYPE] = "card_create"
+        result.loc[result[EVENT_TYPE] == "copyCard", CARD_EVENT_TYPE] = "card_create"
+        result.loc[result[EVENT_TYPE] == "moveCardToBoard", CARD_EVENT_TYPE] = "card_create"
 
     if SOURCE_LIST_ID in result.columns:
         result.loc[result[SOURCE_LIST_ID].notna(), CARD_EVENT_TYPE] = "card_move"

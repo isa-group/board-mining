@@ -125,6 +125,23 @@ report = bomi.validate_canonical_log(canonical)
 | `raw_event_type` | Original event type from the source system |
 | `source_system` | Source tool (e.g., `trello`, `jira`) |
 
+### Process Mining Export
+
+Convert board event logs to process mining formats for advanced analysis:
+
+```python
+# Export to pm4py EventLog format (requires pm4py)
+event_log = bomi.to_event_log(df)
+
+# Convert to process-mining-compatible DataFrame
+process_df = bomi.to_process_dataframe(canonical)
+```
+
+This enables integration with process mining tools like:
+- **ProM** – Process discovery, conformance checking, bottleneck analysis
+- **pm4py** – Python process mining library for automated analysis
+- **Disco** – Interactive process visualization and analysis
+
 ### Board Discovery
 
 Automatically discover the structure and design of your board:
@@ -280,6 +297,52 @@ evolution = bomi.health_evolution(
 ```
 
 Each row is a snapshot of the board's health at that point in time, using all events up to (and including) the reference date. Passing an explicit `prescribed_flow` is recommended when tracking `flow_conformance` over time; otherwise the dominant flow is re-inferred from each slice independently.
+
+## Interactive Dashboard
+
+Launch an interactive web dashboard for visual exploration of board data:
+
+```bash
+# Install dashboard dependencies
+pip install -e ".[dashboard]"
+
+# Launch the dashboard
+bomi-dashboard
+```
+
+The dashboard will be available at **http://localhost:8050** and provides:
+
+- **Matrix view** – Transition matrix visualization showing card movements between lists
+- **Graph view** – Interactive flow graph with hierarchical layout, pan, and zoom controls
+- **Design view** – Board structure diagram showing lists, roles (create/use/close), and flow patterns
+- **Cards view** – Detailed card listing with filtering by list or transition
+- **Filters** – Threshold controls to refine analysis by redesign period, flow patterns, and list roles
+
+### Dashboard Features
+
+**Matrix View:**
+- Heatmap of transitions between lists
+- Show/hide self-loops and zero-count transitions
+- Click to filter cards by transition
+
+**Graph View:**
+- Hierarchical layout with semantic precedence flows
+- Smooth Bezier curves for edge rendering
+- Pan (click+drag) and zoom (scroll) controls
+- Node sizing proportional to activity
+- Edge width proportional to transition volume
+
+**Design View:**
+- Board structure with list boxes and role indicators
+- Connected components showing independent workflows
+- Semantic precedence arrows showing dominant flows
+- Threshold sliders to refine structure discovery
+- Space+drag to pan, Space+scroll to zoom
+
+**Filtering:**
+- Redesign period selection
+- Flow and role threshold controls
+- Card search and transition filtering
 
 ## Examples and Datasets
 

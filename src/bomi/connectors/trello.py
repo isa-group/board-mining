@@ -117,6 +117,18 @@ def from_trello_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Map Trello columns to the bomi schema and compute event types."""
+    # Filter out createCard and updateCard events where both list names are NaN
+    mask_create_or_update = df["type"].isin(["createCard", "updateCard"])
+
+    # Check if columns exist; if not, treat as all NaN
+    list_name_nan = df["data.list.name"].isna() if "data.list.name" in df else pd.Series([True] * len(df))
+    listbefore_name_nan = df["data.listBefore.name"].isna() if "data.listBefore.name" in df else pd.Series([True] * len(df))
+
+    mask_both_lists_nan = list_name_nan & listbefore_name_nan
+    mask_remove = mask_create_or_update & mask_both_lists_nan
+
+    df = df[~mask_remove].copy()
+
     board_log = to_board_log(
         df,
         column_map=TRELLO_COLUMN_MAP,

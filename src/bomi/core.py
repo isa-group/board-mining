@@ -234,7 +234,7 @@ def list_evolution(df: pd.DataFrame, filter_short_lists=None) -> pd.DataFrame:
 
 def detect_redesign(
     df: pd.DataFrame,
-    threshold,
+    threshold=pd.Timedelta("1D"),
     l_type=None,
     threshold_l_events: int = 0,
 ) -> pd.DataFrame:
@@ -255,6 +255,7 @@ def detect_redesign(
     threshold:
         Either a :class:`pandas.Timedelta` (time window) or an ``int``
         (maximum number of intervening card events before the redesign ends).
+        Defaults to ``pd.Timedelta("1D")``.
     l_type:
         Restrict the triggering list events to a subset of
         ``list_event_type`` values (e.g. ``["list_create", "list_rename"]``).
@@ -532,7 +533,33 @@ def transition_matrix(df: pd.DataFrame, use: str = "names") -> pd.DataFrame:
         return matrix.rename(index=conversion_map, columns=conversion_map)
 
 
-def connected_lists(df: pd.DataFrame, use: str = "id", threshold: int = 0) -> pd.DataFrame:
+def _apply_relative_threshold(series: pd.Series, threshold_percent: float) -> pd.Series:
+    """Filter series by relative threshold (percentage of maximum value).
+
+    Parameters
+    ----------
+    series:
+        Values to filter.
+    threshold_percent:
+        Percentage threshold (0-100). Items with value >= max * threshold% are included.
+
+    Returns
+    -------
+    pd.Series
+        Boolean mask for items to include.
+    """
+    if threshold_percent < 0 or threshold_percent > 100:
+        raise ValueError("threshold_percent must be between 0 and 100")
+
+    max_val = series.max()
+    if max_val == 0:
+        # When max is 0, include everything (graceful degradation on sparse data)
+        return pd.Series(True, index=series.index)
+
+    return series >= (max_val * threshold_percent / 100)
+
+
+def connected_lists(df: pd.DataFrame, use: str = "id", threshold: float = 0) -> pd.DataFrame:
     """Find connected components in the card-flow graph between lists.
 
     Two lists are connected if at least one card moved between them (directly
@@ -546,8 +573,8 @@ def connected_lists(df: pd.DataFrame, use: str = "id", threshold: int = 0) -> pd
     use:
         Column used to identify lists: ``"id"`` (default) or ``"names"``.
     threshold:
-        Minimum number of card movements required for an edge to be included.
-        ``0`` (default) includes any movement.
+        Percentage threshold (0-100). Include edges with movement count >= max * threshold%.
+        ``0`` (default) includes all movements; ``100`` includes only the most frequent edge.
 
     Returns
     -------
@@ -568,7 +595,8 @@ def connected_lists(df: pd.DataFrame, use: str = "id", threshold: int = 0) -> pd
 
     if threshold > 0:
         count = df[pair + [CARD_ID]].dropna().groupby(pair).count()
-        G.add_edges_from(count[count[CARD_ID] > threshold].index.to_numpy().tolist())
+        mask = _apply_relative_threshold(count[CARD_ID], threshold)
+        G.add_edges_from(count[mask].index.to_numpy().tolist())
     else:
         G.add_edges_from(df[pair].dropna().to_numpy().tolist())
 
@@ -583,7 +611,7 @@ def card_action_list(
     df: pd.DataFrame,
     type: str = "card_create",
     use: str = "id",
-    threshold: int = 0,
+    threshold: float = 0,
 ) -> pd.Series:
     """Return the normalised fraction of a given event type per list.
 
@@ -598,7 +626,8 @@ def card_action_list(
         Column used to identify lists: ``"id"`` (default, result index is
         human-readable list names) or ``"names"``.
     threshold:
-        Lists with a raw count ≤ *threshold* are excluded.
+        Percentage threshold (0-100). Include lists with activity count >= max * threshold%.
+        ``0`` (default) includes all lists; ``100`` includes only the most active list.
 
     Returns
     -------
@@ -612,7 +641,8 @@ def card_action_list(
     if use == "id":
         result = result.rename(index=_create_conversion_map(df))
 
-    return result[result > threshold].transform(lambda x: x / x.sum())
+    mask = _apply_relative_threshold(result, threshold)
+    return result[mask].transform(lambda x: x / x.sum())
 
 
 def flow_semantic_precedence(
@@ -633,8 +663,8 @@ def flow_semantic_precedence(
     use:
         Column used to identify lists: ``"id"`` (default) or ``"names"``.
     threshold:
-        Minimum fraction of total card movements required for a pair to be
-        included (``0`` keeps all pairs).
+        Percentage threshold (0-100). Include pairs with movement count >= max * threshold%.
+        ``0`` (default) includes all pairs; ``100`` includes only the most frequent pair.
 
     Returns
     -------
@@ -644,9 +674,10 @@ def flow_semantic_precedence(
     matrix = transition_matrix(df, use)
 
     if threshold > 0:
-        num_moves = (df[CARD_EVENT_TYPE] == "card_move").sum()
-        matrix = matrix / num_moves
-        matrix = matrix[matrix > threshold]
+        # Flatten matrix to find the maximum pair count
+        flat = matrix.stack()
+        mask = _apply_relative_threshold(flat, threshold)
+        return list(flat[mask].index)
 
     return list(matrix.stack().index)
 
@@ -718,17 +749,18 @@ class BoardModel:
 def board_discovery(
     df: pd.DataFrame,
     use: str = "id",
-    cf_threshold: int = 0,
-    cc_threshold: int = 0,
-    cx_threshold: int = 0,
-    cu_threshold: int = 0,
+    cf_threshold: float = 0,
+    cc_threshold: float = 0,
+    cx_threshold: float = 0,
+    cu_threshold: float = 0,
     sp_threshold: float = 0,
 ) -> BoardModel:
     """Infer the board design from observed card and list behaviour.
 
     Combines connected-list analysis, per-list activity distributions, and
     semantic precedence into a single characterisation of how the board is
-    structured and used.
+    structured and used. All thresholds use relative semantics: include items
+    that represent >= threshold% of the maximum activity in their category.
 
     Parameters
     ----------
@@ -738,15 +770,20 @@ def board_discovery(
         Column used to identify lists throughout: ``"id"`` (default) or
         ``"names"``.
     cf_threshold:
-        Movement threshold forwarded to :func:`connected_lists`.
+        Card-flow percentage threshold (0-100) forwarded to :func:`connected_lists`.
+        Include edges with movement count >= max * threshold%.
     cc_threshold:
-        Activity threshold for card-creation lists.
+        Card-creation percentage threshold (0-100).
+        Include lists with creation count >= max * threshold%.
     cx_threshold:
-        Activity threshold for card-close lists.
+        Card-close percentage threshold (0-100).
+        Include lists with close count >= max * threshold%.
     cu_threshold:
-        Activity threshold for card-use (action) lists.
+        Card-use (action) percentage threshold (0-100).
+        Include lists with action count >= max * threshold%.
     sp_threshold:
-        Movement fraction threshold for semantic precedence pairs.
+        Semantic-precedence percentage threshold (0-100).
+        Include pairs with movement count >= max * threshold%.
 
     Returns
     -------

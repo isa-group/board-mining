@@ -184,3 +184,126 @@ def test_plot_board_model_handles_empty_model():
     fig, ax = plt.subplots()
     result = bomi.plot_board_model(empty, ax=ax)
     assert result is ax
+
+
+# ---------------------------------------------------------------------------
+# Tests for relative threshold semantics
+# ---------------------------------------------------------------------------
+
+def test_apply_relative_threshold_with_percentages():
+    """Test that relative thresholds filter by percentage of maximum value."""
+    from bomi.core import _apply_relative_threshold
+
+    series = pd.Series([10, 20, 30, 40], index=['a', 'b', 'c', 'd'])
+
+    # 0% threshold: include all
+    mask = _apply_relative_threshold(series, 0)
+    assert mask.all()
+
+    # 50% threshold: include values >= 40 * 0.5 = 20
+    mask = _apply_relative_threshold(series, 50)
+    assert list(series[mask].index) == ['b', 'c', 'd']
+
+    # 100% threshold: include only max value
+    mask = _apply_relative_threshold(series, 100)
+    assert list(series[mask].index) == ['d']
+
+
+def test_apply_relative_threshold_zero_max():
+    """Test that zero max returns all True (graceful degradation)."""
+    from bomi.core import _apply_relative_threshold
+
+    series = pd.Series([0, 0, 0], index=['a', 'b', 'c'])
+
+    # When max is 0, include everything
+    mask = _apply_relative_threshold(series, 50)
+    assert mask.all()
+
+
+def test_apply_relative_threshold_invalid_range():
+    """Test that invalid threshold values raise ValueError."""
+    from bomi.core import _apply_relative_threshold
+
+    series = pd.Series([1, 2, 3])
+
+    with pytest.raises(ValueError):
+        _apply_relative_threshold(series, -1)
+
+    with pytest.raises(ValueError):
+        _apply_relative_threshold(series, 101)
+
+
+def test_connected_lists_with_relative_threshold():
+    """Test connected_lists uses relative threshold semantics."""
+    df = sample_log()
+
+    # With 0% threshold, all edges are included
+    result_0 = bomi.connected_lists(df, threshold=0)
+    assert len(result_0) > 0
+
+    # With 100% threshold, only the most frequent edge is included
+    # This may result in fewer or same number of components
+    result_100 = bomi.connected_lists(df, threshold=100)
+    assert len(result_100) <= len(result_0)
+
+
+def test_card_action_list_with_relative_threshold():
+    """Test card_action_list uses relative threshold semantics."""
+    df = sample_log()
+
+    # With 0% threshold, all lists are included
+    result_0 = bomi.card_action_list(df, type="card_create", threshold=0)
+    assert len(result_0) > 0
+
+    # With 100% threshold, only the list with max creates is included
+    result_100 = bomi.card_action_list(df, type="card_create", threshold=100)
+    assert len(result_100) <= len(result_0)
+
+    # Result should still sum to 1 (it's normalized)
+    if len(result_100) > 0:
+        assert abs(result_100.sum() - 1.0) < 1e-10
+
+
+def test_flow_semantic_precedence_with_relative_threshold():
+    """Test flow_semantic_precedence uses relative threshold semantics."""
+    df = sample_log()
+
+    # With 0% threshold, all transitions are included
+    result_0 = bomi.flow_semantic_precedence(df, threshold=0)
+    assert len(result_0) > 0
+
+    # With 100% threshold, only the most frequent transition is included
+    result_100 = bomi.flow_semantic_precedence(df, threshold=100)
+    assert len(result_100) <= len(result_0)
+
+    # 50% threshold should be between 0% and 100%
+    result_50 = bomi.flow_semantic_precedence(df, threshold=50)
+    assert len(result_100) <= len(result_50) <= len(result_0)
+
+
+def test_board_discovery_with_relative_thresholds():
+    """Test board_discovery combines all relative thresholds correctly."""
+    df = sample_log()
+
+    # All thresholds at 0% should give maximum structure
+    board_0 = bomi.board_discovery(
+        df,
+        cf_threshold=0,
+        cc_threshold=0,
+        cx_threshold=0,
+        cu_threshold=0,
+        sp_threshold=0,
+    )
+
+    # All thresholds at 100% should give minimal structure
+    board_100 = bomi.board_discovery(
+        df,
+        cf_threshold=100,
+        cc_threshold=100,
+        cx_threshold=100,
+        cu_threshold=100,
+        sp_threshold=100,
+    )
+
+    # More lenient thresholds should result in more semantic precedence pairs
+    assert len(board_0.semantic_precedence) >= len(board_100.semantic_precedence)

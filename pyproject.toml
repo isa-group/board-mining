@@ -30,11 +30,19 @@ dependencies = [
 
 [project.optional-dependencies]
 process = ["pm4py"]
-dev = ["pytest"]
+dashboard = ["fastapi>=0.111", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "requests-oauthlib>=1.3"]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+bomi-dashboard = "bomi.dashboard:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"bomi.dashboard" = ["server/static/**/*"]
+
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src"]
 pythonpath = ["src"]
+asyncio_mode = "auto"

@@ -1,0 +1,166 @@
+/**
+ * Board Design Element Styling
+ * Styles for diagram-js board design elements
+ */
+
+/* Container and canvas */
+.djs-container {
+  background: var(--surface) !important;
+}
+
+.djs-canvas {
+  background: var(--surface) !important;
+}
+
+/* ListBox shapes */
+.board-list-box {
+  stroke: var(--accent) !important;
+  fill: var(--surface) !important;
+  stroke-width: 1.5 !important;
+  transition: all 0.15s ease;
+}
+
+.board-list-box:hover {
+  stroke: var(--accent) !important;
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 4px rgba(108, 142, 245, 0.3));
+}
+
+.djs-shape.board\:ListBox.selected .board-list-box,
+.board-list-box.selected {
+  stroke: var(--accent) !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 6px rgba(108, 142, 245, 0.5));
+}
+
+/* CardFlow containers */
+.board-card-flow {
+  stroke: var(--border) !important;
+  stroke-dasharray: 4, 4;
+  fill: rgba(108, 142, 245, 0.03) !important;
+  stroke-width: 1 !important;
+  transition: all 0.15s ease;
+}
+
+.board-card-flow:hover {
+  stroke: var(--accent) !important;
+  stroke-width: 1.5 !important;
+}
+
+.djs-shape.board\:CardFlow.selected .board-card-flow,
+.board-card-flow.selected {
+  stroke: var(--accent) !important;
+  stroke-width: 2 !important;
+}
+
+/* SemanticPreference connections */
+.board-semantic-preference {
+  stroke: var(--text-muted) !important;
+  stroke-dasharray: 4, 4 !important;
+  fill: none !important;
+  transition: stroke 0.15s ease;
+}
+
+/* Hover on path directly */
+.board-semantic-preference:hover {
+  stroke: var(--accent) !important;
+  stroke-width: 2 !important;
+  stroke-dasharray: 4, 4 !important;
+}
+
+/* Hover on connection group */
+.djs-connection:hover .board-semantic-preference {
+  stroke: var(--accent) !important;
+  stroke-width: 2 !important;
+  stroke-dasharray: 4, 4 !important;
+}
+
+/* Hover on any path in semantic preference connection */
+.djs-connection .board-semantic-preference:hover,
+.djs-connection:hover .board-semantic-preference {
+  stroke: var(--accent) !important;
+  stroke-width: 2 !important;
+}
+
+.djs-connection.board\:SemanticPreference.selected .board-semantic-preference,
+.board-semantic-preference.selected {
+  stroke: var(--accent) !important;
+  stroke-width: 2.5 !important;
+}
+
+/* Labels and text */
+.board-list-label {
+  font-size: 12px !important;
+  fill: var(--text) !important;
+  font-weight: 500 !important;
+  pointer-events: none;
+}
+
+.board-flow-label {
+  font-size: 11px !important;
+  fill: var(--text) !important;
+  font-weight: 600 !important;
+  pointer-events: none;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.board-volume-label {
+  font-size: 10px !important;
+  fill: var(--text-muted) !important;
+  font-weight: 500 !important;
+  pointer-events: none;
+  background: var(--surface-2);
+  padding: 2px 4px;
+}
+
+/* Role icons */
+.board-icon {
+  font-weight: bold;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.2));
+}
+
+.board-icon.create {
+  fill: #52c77f;
+}
+
+.board-icon.close {
+  fill: #f56c6c;
+}
+
+.board-icon.use {
+  fill: #6c8ef5;
+}
+
+/* Arrow marker */
+#board-arrow-marker path {
+  fill: var(--text-muted) !important;
+}
+
+/* Selection overlay */
+.djs-shape.selected .board-list-box,
+.djs-shape.selected .board-card-flow {
+  filter: drop-shadow(0 0 8px rgba(108, 142, 245, 0.4));
+}
+
+/* Hover effects */
+.djs-shape:hover .board-list-box {
+  filter: drop-shadow(0 0 3px rgba(108, 142, 245, 0.25));
+}
+
+/* Connection handles */
+.djs-connection.selected {
+  stroke-opacity: 1 !important;
+}
+
+.djs-handle {
+  fill: var(--accent) !important;
+  stroke: var(--surface) !important;
+  stroke-width: 1 !important;
+}
+
+.djs-handle:hover {
+  fill: var(--accent) !important;
+  opacity: 0.8 !important;
+}
